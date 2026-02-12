@@ -1,0 +1,8 @@
+/span_aligner.egg-info
+/span_aligner/__pycache__
+/spanprojecting/library/__pycache__
+/spanprojecting/span_aligners/__pycache__
+/tests/__pycache__
+/dist
+/spanprojecting
+*.ipynb
