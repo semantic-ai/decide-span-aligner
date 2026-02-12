@@ -1,6 +1,10 @@
-# Span Projecting & Alignment
+# span-aligner
 
-A utility for aligning and mapping text spans between different text representations, and projecting annotations across languages using semantic alignment.
+[PyPI: span-aligner](https://pypi.org/project/span-aligner/)
+
+## Span Projecting & Alignment
+
+**span-aligner** is a Python utility for aligning and mapping text spans between different versions of a text, and for projecting annotations across languages using semantic alignment. It supports both monolingual (fuzzy/regex) and cross-lingual (embedding-based) span mapping, making it ideal for tasks like annotation transfer, text comparison, and multilingual NLP workflows.
 
 ## Features
 
