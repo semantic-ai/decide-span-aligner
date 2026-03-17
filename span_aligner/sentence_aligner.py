@@ -17,6 +17,8 @@ except ImportError:
     nx = None
 import torch
 
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # DATA STRUCTURES
@@ -40,6 +42,7 @@ class AlignmentResult:
     similarity_matrix: np.ndarray
     src_vectors: np.ndarray
     tgt_vectors: np.ndarray
+    topk_candidates: Optional[Dict[int, List[Tuple[int, float]]]] = None
 
 
 # =============================================================================
@@ -119,31 +122,74 @@ class TransformerEmbeddingProvider(EmbeddingProvider):
         return subwords, word_map
     
     def get_embeddings(self, tokens: List[str]) -> np.ndarray:
-        with torch.no_grad():
-            inputs = self.tokenizer(tokens, is_split_into_words=True, 
-                                   padding=True, truncation=True, return_tensors="pt")
-            hidden = self.emb_model(**inputs.to(self.device))["hidden_states"]
-            if self.layer >= len(hidden):
-                raise ValueError(f"Layer {self.layer} requested but model has only {len(hidden)} layers.")
-            outputs = hidden[self.layer][:, 1:-1, :]
-            return outputs.cpu().numpy()
+        """Get embeddings for a list of tokens, handling long sequences by chunking."""
+        if not tokens:
+            return np.empty((0, 0))
+            
+        max_length = self.tokenizer.model_max_length
+        if max_length > 100000: # Some tokenizers report very large max lengths
+            max_length = 512
+            
+        # We need to leave room for special tokens (e.g., [CLS], [SEP])
+        max_subwords = max_length - 2
+        
+        # First, get subwords to know where to chunk
+        subwords = []
+        word_to_subword_counts = []
+        for word in tokens:
+            word_subwords = self.tokenizer.tokenize(word)
+            subwords.extend(word_subwords)
+            word_to_subword_counts.append(len(word_subwords))
+            
+        if len(subwords) <= max_subwords:
+            # Fast path for short sequences
+            with torch.no_grad():
+                inputs = self.tokenizer(tokens, is_split_into_words=True, 
+                                       padding=True, truncation=True, return_tensors="pt")
+                hidden = self.emb_model(**inputs.to(self.device))["hidden_states"]
+                if self.layer >= len(hidden):
+                    raise ValueError(f"Layer {self.layer} requested but model has only {len(hidden)} layers.")
+                outputs = hidden[self.layer][:, 1:-1, :]
+                return outputs.cpu().numpy()[0]
+                
+        # Slow path for long sequences: chunking
+        all_outputs = []
+        current_chunk_words = []
+        current_subword_count = 0
+        
+        for word, count in zip(tokens, word_to_subword_counts):
+            if current_subword_count + count > max_subwords and current_chunk_words:
+                # Process current chunk
+                with torch.no_grad():
+                    inputs = self.tokenizer(current_chunk_words, is_split_into_words=True, 
+                                           padding=True, truncation=True, return_tensors="pt")
+                    hidden = self.emb_model(**inputs.to(self.device))["hidden_states"]
+                    outputs = hidden[self.layer][:, 1:-1, :]
+                    all_outputs.append(outputs.cpu().numpy()[0])
+                
+                # Reset for next chunk
+                current_chunk_words = [word]
+                current_subword_count = count
+            else:
+                current_chunk_words.append(word)
+                current_subword_count += count
+                
+        # Process final chunk
+        if current_chunk_words:
+            with torch.no_grad():
+                inputs = self.tokenizer(current_chunk_words, is_split_into_words=True, 
+                                       padding=True, truncation=True, return_tensors="pt")
+                hidden = self.emb_model(**inputs.to(self.device))["hidden_states"]
+                outputs = hidden[self.layer][:, 1:-1, :]
+                all_outputs.append(outputs.cpu().numpy()[0])
+                
+        return np.concatenate(all_outputs, axis=0)
     
     def get_embeddings_batch(self, batch: List[List[str]]) -> List[np.ndarray]:
-        """Get embeddings for a batch of token lists."""
-        with torch.no_grad():
-            inputs = self.tokenizer(batch, is_split_into_words=True,
-                                   padding=True, truncation=True, return_tensors="pt")
-            hidden = self.emb_model(**inputs.to(self.device))["hidden_states"]
-            outputs = hidden[self.layer][:, 1:-1, :]
-            
-            results = []
-            for i, tokens in enumerate(batch):
-                subwords = []
-                for word in tokens:
-                    subwords.extend(self.tokenizer.tokenize(word))
-                seq_len = len(subwords)
-                results.append(outputs[i, :seq_len].cpu().numpy())
-            return results
+        """Get embeddings for a batch of token lists, handling long sequences."""
+        # For simplicity and robustness with long texts, process individually
+        # since different items in the batch might need different chunking
+        return [self.get_embeddings(tokens) for tokens in batch]
 
 
 class OllamaEmbeddingProvider(EmbeddingProvider):
@@ -170,21 +216,27 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         if not tokens:
             return np.empty((0, 0))
 
-        response = self._requests.post(
-            f"{self.base_url}/api/embed",
-            json={
-                "model": self.model,
-                "input": tokens,
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
+        # Ollama has a context window limit (often 2048 or 8192 tokens depending on the model)
+        # We chunk the input to be safe. 500 words is a safe conservative chunk size.
+        chunk_size = 500
+        all_embeddings = []
+        
+        for i in range(0, len(tokens), chunk_size):
+            chunk = tokens[i:i + chunk_size]
+            response = self._requests.post(
+                f"{self.base_url}/api/embed",
+                json={
+                    "model": self.model,
+                    "input": chunk,
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
 
-        data = response.json()
+            data = response.json()
+            all_embeddings.extend(data["embeddings"])
 
-        # Ollama returns: { "embeddings": [ [...], [...], ... ] }
-        embeddings = data["embeddings"]
-        return np.array(embeddings, dtype=np.float32)
+        return np.array(all_embeddings, dtype=np.float32)
 
 
 
@@ -209,7 +261,20 @@ class SentenceTransformerProvider(EmbeddingProvider):
         return words, list(range(len(words)))
     
     def get_embeddings(self, tokens: List[str]) -> np.ndarray:
-        return self.model.encode(tokens, convert_to_numpy=True)
+        if not tokens:
+            return np.empty((0, 0))
+            
+        # SentenceTransformers also has a max_seq_length (usually 128, 256, or 512)
+        # We chunk the input to be safe.
+        chunk_size = 250
+        all_embeddings = []
+        
+        for i in range(0, len(tokens), chunk_size):
+            chunk = tokens[i:i + chunk_size]
+            chunk_embeddings = self.model.encode(chunk, convert_to_numpy=True)
+            all_embeddings.append(chunk_embeddings)
+            
+        return np.concatenate(all_embeddings, axis=0)
 
 
 # =============================================================================
@@ -481,6 +546,51 @@ class SentenceAligner:
             return sub_start, sub_end
         return word_start, word_end
 
+    def _get_topk_alignments(self, sim: np.ndarray, src_w2b: List[int], tgt_w2b: List[int],
+                             n_src_word: int, n_tgt_word: int,
+                             top_k: int = 5, threshold: float = 0.5) -> Dict[int, List[Tuple[int, float]]]:
+        """
+        Convert similarity matrix to top K alignment candidates per source token.
+        Returns a dict mapping src_idx to a list of (tgt_idx, score) tuples.
+        
+        Guarantees at least 1 candidate per source token (the best match),
+        even if it falls below the threshold. This prevents the DP from
+        having dead spots where source tokens are unaligned.
+        """
+        word_sim = np.zeros((n_src_word, n_tgt_word))
+        if self.token_type == "bpe":
+            for i in range(min(sim.shape[0], len(src_w2b))):
+                for j in range(min(sim.shape[1], len(tgt_w2b))):
+                    src_idx = src_w2b[i] if i < len(src_w2b) else i
+                    tgt_idx = tgt_w2b[j] if j < len(tgt_w2b) else j
+                    if src_idx < n_src_word and tgt_idx < n_tgt_word:
+                        word_sim[src_idx, tgt_idx] = max(word_sim[src_idx, tgt_idx], sim[i, j])
+        else:
+            word_sim[:sim.shape[0], :sim.shape[1]] = sim
+            
+        candidates = {}
+        for i in range(n_src_word):
+            src_candidates = []
+            best_j, best_score = -1, -1.0
+            for j in range(n_tgt_word):
+                score = word_sim[i, j]
+                if score >= threshold:
+                    src_candidates.append((j, float(score)))
+                # Track global best regardless of threshold
+                if score > best_score:
+                    best_score = score
+                    best_j = j
+            src_candidates.sort(key=lambda x: x[1], reverse=True)
+            src_candidates = src_candidates[:top_k]
+            
+            # Guarantee at least 1 candidate: include the best match even if below threshold
+            if not src_candidates and best_j >= 0:
+                src_candidates = [(best_j, float(best_score))]
+                
+            candidates[i] = src_candidates
+            
+        return candidates
+
     def _get_alignments_from_similarity(self, sim: np.ndarray, vectors: List[np.ndarray],
                                         src_w2b: List[int], tgt_w2b: List[int],
                                         n_src_sub: int, n_tgt_sub: int,
@@ -504,6 +614,7 @@ class SentenceAligner:
             Dictionary mapping method names to sorted alignment lists
         """
         all_mats = self._compute_alignments(sim)
+        logger.debug(f"Computed alignment matrices for methods: {list(all_mats.keys())}")
         aligns = {method: set() for method in self.matching_methods}
         
         n_src = n_src_sub if self.token_type == "bpe" else n_src_word
@@ -564,14 +675,15 @@ class SentenceAligner:
         Returns:
             AlignmentResult with alignments, tokens, and similarity matrix
         """
-        print("1.1 Computing alignments...")
+        logger.debug("Computing alignments...")
         result = self.align_texts_partial(src_text, tgt_text, src_char_start=0, src_char_end=None)
-        print("1.2 Alignments computed.")
+        logger.debug("Alignments computed.")
         return result
 
     def align_texts_partial(self, src_text: str, tgt_text: str,
                            src_char_start: int = 0,
-                           src_char_end: Optional[int] = None) -> AlignmentResult:
+                           src_char_end: Optional[int] = None,
+                           top_k: int = 5) -> AlignmentResult:
         """
         Align two texts with partial source range defined by character positions.
         
@@ -580,6 +692,7 @@ class SentenceAligner:
             tgt_text: Target text string
             src_char_start: Start index (char position) in source text
             src_char_end: End index (char position) in source text (None = end of text)
+            top_k: Number of top alignments to return
             
         Returns:
             AlignmentResult with alignments for the partial source range.
@@ -589,7 +702,7 @@ class SentenceAligner:
         tgt_tokens, tgt_vectors = self.get_text_embeddings(tgt_text)
         
         return self.align_texts_partial_with_embeddings(
-            src_tokens, tgt_tokens, src_vectors, tgt_vectors, src_char_start, src_char_end
+            src_tokens, tgt_tokens, src_vectors, tgt_vectors, src_char_start, src_char_end, top_k=top_k
         )
         
     def align_texts_partial_with_embeddings(self, 
@@ -598,7 +711,8 @@ class SentenceAligner:
                                             src_vectors: np.ndarray,
                                             tgt_vectors: np.ndarray,
                                             src_char_start: int,
-                                            src_char_end: Optional[int] = None) -> AlignmentResult:
+                                            src_char_end: Optional[int] = None,
+                                            top_k: int = 5) -> AlignmentResult:
         """
         Align partial source text to target text using pre-computed embeddings and character positions.
         """
@@ -643,20 +757,48 @@ class SentenceAligner:
         # Determine source subword range
         src_sub_start, src_sub_end = self._get_subword_range(src_start_idx, src_end_idx, src_w2b)
         
+        # Handle out-of-bounds indices
+        if src_sub_end > src_vectors.shape[0]:
+            if src_sub_start >= src_vectors.shape[0]:
+                if len(src_w2b) > 0:
+                    logger.warning(
+                        f"Source subword start index ({src_sub_start}) is beyond source vectors length ({src_vectors.shape[0]}). "
+                        "Cannot align this text span as it has no embeddings (likely truncated by the model)."
+                    )
+                src_sub_start = src_vectors.shape[0]
+                src_sub_end = src_vectors.shape[0]
+                src_end_idx = src_start_idx
+            else:
+                logger.warning(
+                    f"Source subword end index ({src_sub_end}) exceeds source vectors length ({src_vectors.shape[0]}). "
+                    "Truncating the alignment range to match available embeddings."
+                )
+                src_sub_end = src_vectors.shape[0]
+                # Adjust src_end_idx to match the truncated subwords
+                if src_sub_end > src_sub_start:
+                    last_available_word_idx = src_w2b[src_sub_end - 1]
+                    src_end_idx = min(src_end_idx, last_available_word_idx + 1)
+                else:
+                    src_end_idx = src_start_idx
+
         # Slice source vectors
         src_partial_vecs = src_vectors[src_sub_start:src_sub_end]
         src_w2b_partial = [idx - src_start_idx for idx in src_w2b[src_sub_start:src_sub_end]]
-        
         # Compute similarity
         sim_partial = self.get_similarity(src_partial_vecs, tgt_vectors)
         sim_partial = self.apply_distortion(sim_partial, self.distortion)
-        
         # Compute alignments
         aligns = self._get_alignments_from_similarity(
             sim_partial, [src_partial_vecs, tgt_vectors], src_w2b_partial, tgt_w2b,
             len(src_w2b_partial), len(tgt_subwords),
             src_end_idx - src_start_idx, len(tgt_words),
             tgt_offset=0
+        )
+        
+        topk_candidates = self._get_topk_alignments(
+            sim_partial, src_w2b_partial, tgt_w2b,
+            src_end_idx - src_start_idx, len(tgt_words),
+            top_k=top_k, threshold=0.5
         )
         
         partial_src_tokens = src_tokens[src_start_idx:src_end_idx]
@@ -667,7 +809,8 @@ class SentenceAligner:
             tgt_tokens=tgt_tokens,
             similarity_matrix=sim_partial,
             src_vectors=src_partial_vecs,
-            tgt_vectors=tgt_vectors
+            tgt_vectors=tgt_vectors,
+            topk_candidates=topk_candidates
         )
 
     def align_texts_partial_substring(self, src_text: str, tgt_text: str,

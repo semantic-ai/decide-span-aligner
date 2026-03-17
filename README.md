@@ -8,8 +8,11 @@
 
 ## Features
 
-- **Span Alignment**: Sanitize boundaries, fuzzy match segments, map spans between text versions.
-- **Span Projection**: Project annotations from a source text (e.g., English) to a target text (e.g., Dutch) using embeddings.
+The library consists of three main classes:
+
+1.  **`SentenceAligner`**: Handles the low-level token alignment between two strings. It computes similarity matrices using embeddings and applies matching algorithms (like Max Weight Matching) to find the best token correspondence.
+2.  **`SpanAligner`**: A utility class for converting between annotation formats. It handles the conversion between Label Studio-style JSON annotations and XML-tagged text strings (e.g., `<label>text</label>`).
+3.  **`SpanProjector`**: The high-level orchestrator that uses `SentenceAligner` to project spans from source to target. It handles token clustering and span boundary reconstruction.
 
 ## Installation
 
@@ -18,6 +21,62 @@ Install:
 ```bash
 pip install span-aligner
 ```
+
+## Quick Start: Span Projection
+
+The `SpanProjector` is the primary class for projecting annotations. It uses semantic alignment based on transformer embeddings (BERT, XLM-R) to map tokens between sentences.
+
+```python
+from span_aligner import SpanProjector
+from IPython.display import display, HTML
+
+# Initialize the projector
+# model: 'bert' (multilingual cased) or 'xlmr' / 'xlmr-large'
+# token_type: 'bpe' (recommended for transformers) or 'word'
+projector = SpanProjector(
+    src_lang="en", 
+    tgt_lang="nl", 
+    model="bert", 
+    token_type="bpe",
+    matching_method="inter"
+)
+
+text_src = """This is a long and winded sentence to test the mapping of 'Ghent, Belgium' to the target text in Dutch.
+With some additional context to make it more complex and realistic for the span projection process."""
+
+text_tgt = """Dit is een lange en omslachtige zin om de mapping van 'Gent, België' naar de doeltaal in het Nederlands te testen.
+Met wat extra context om het complexer en realistischer te maken voor het spanprojectieproces."""
+
+spans = [
+    {"start": 59, "end": 73, "text": "Ghent, Belgium", "labels": ["LOC"]},
+]
+
+# 1. Project Spans with Visualization (for Jupyter Notebooks)
+# Returns both the projected spans and a list of HTML strings visualizing the alignment process
+projected_spans, renderings = projector.project_spans_with_renderings(text_src, text_tgt, spans)
+
+print("Projected Spans:")
+print(projected_spans)
+
+# In a notebook, use display(HTML(...)) to see the alignment details
+if renderings:
+    display(HTML(renderings[0]))
+```
+
+**Output (Console):**
+
+```python
+Projected Spans:
+[{'start': 55, 'end': 67, 'text': 'Gent, België', 'labels': ['LOC']}]
+```
+
+**Output (Visualization):**
+
+The method `project_spans_with_renderings` returns rich HTML that visualizes the alignment candidates and the chosen path.
+
+<table border='1' style='border-collapse:collapse;text-align:center;font-family:sans-serif;'><tr><th style='padding:5px;'>Rank \ Src Idx</th><th style='padding:5px;'>0<br><small>Ghent</small></th><th style='padding:5px;'>1<br><small>,</small></th><th style='padding:5px;'>2<br><small>Belgium</small></th></tr><tr><td style='padding:5px;'><b>0</b></td><td style='background-color: #ffb3ba; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>12</span><br>Gent<br><small>(0.88)</small><br><b>[P0,P1,P2,P3,P4]</b></td><td style='background-color: #ffb3ba; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>13</span><br>,<br><small>(0.94)</small><br><b>[P0,P1,P2,P3,P4]</b></td><td style='background-color: #ffb3ba; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>14</span><br>België<br><small>(0.95)</small><br><b>[P0]</b></td></tr><tr><td style='padding:5px;'><b>1</b></td><td style='padding: 5px; color: #555; '>14<br>België<br><small style='color: #666;'>(0.85)</small></td><td style='background-color:#f9f9f9;'></td><td style='background-color: #baffc9; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>12</span><br>Gent<br><small>(0.86)</small><br><b>[P1]</b></td></tr><tr><td style='padding:5px;'><b>2</b></td><td style='padding: 5px; color: #555; '>13<br>,<br><small style='color: #666;'>(0.84)</small></td><td style='background-color:#f9f9f9;'></td><td style='background-color: #bae1ff; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>13</span><br>,<br><small>(0.83)</small><br><b>[P2]</b></td></tr><tr><td style='padding:5px;'><b>3</b></td><td style='padding: 5px; color: #555; '>15<br>'<br><small style='color: #666;'>(0.79)</small></td><td style='background-color:#f9f9f9;'></td><td style='background-color: #ffb3ff; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>21</span><br>Nederlands<br><small>(0.79)</small><br><b>[P4]</b></td></tr><tr><td style='padding:5px;'><b>4</b></td><td style='padding: 5px; color: #555; '>9<br>mapping<br><small style='color: #666;'>(0.78)</small></td><td style='background-color:#f9f9f9;'></td><td style='background-color: #ffffba; color: black; padding: 5px; border: 2px solid #333; '><span style='font-size: 1.2em;'>15</span><br>'<br><small>(0.78)</small><br><b>[P3]</b></td></tr></table><div style='margin-top:20px;font-family:sans-serif;'><h3>Top Paths:</h3><ul style='list-style-type:none;padding:0;'><li style='margin-bottom:10px;'><span style='background-color:#ffb3ba;padding:2px 8px;border-radius:4px;font-weight:bold;border:1px solid #333;'>P0</span> <b>Score: 19.19</b> <br> <b>12</b>(s:0,r:0) &rarr; <b>13</b>(s:1,r:0) &rarr; <b>14</b>(s:2,r:0)</li><li style='margin-bottom:10px;'><span style='background-color:#baffc9;padding:2px 8px;border-radius:4px;font-weight:bold;border:1px solid #333;'>P1</span> <b>Score: 18.34</b> <br> <b>12</b>(s:0,r:0) &rarr; <b>13</b>(s:1,r:0) &rarr; <b>12</b>(s:2,r:1)</li><li style='margin-bottom:10px;'><span style='background-color:#bae1ff;padding:2px 8px;border-radius:4px;font-weight:bold;border:1px solid #333;'>P2</span> <b>Score: 16.99</b> <br> <b>12</b>(s:0,r:0) &rarr; <b>13</b>(s:1,r:0) &rarr; <b>13</b>(s:2,r:2)</li><li style='margin-bottom:10px;'><span style='background-color:#ffffba;padding:2px 8px;border-radius:4px;font-weight:bold;border:1px solid #333;'>P3</span> <b>Score: 16.50</b> <br> <b>12</b>(s:0,r:0) &rarr; <b>13</b>(s:1,r:0) &rarr; <b>15</b>(s:2,r:4)</li><li style='margin-bottom:10px;'><span style='background-color:#ffb3ff;padding:2px 8px;border-radius:4px;font-weight:bold;border:1px solid #333;'>P4</span> <b>Score: 10.59</b> <br> <b>12</b>(s:0,r:0) &rarr; <b>13</b>(s:1,r:0) &rarr; <b>21</b>(s:2,r:3)</li></ul></div>
+
+For standard projection without visualization, you can use `projector.project_spans(text_src, text_tgt, spans)`.
 
 ## Usage
 
@@ -315,3 +374,4 @@ projector = SpanProjector(matching_method="inter")
 
 - `token_type="bpe"` (Recommended): Uses the transformer's subword tokenizer (e.g. WordPiece). Handles rare words better and aligns closer to the model's internal representation.
 - `token_type="word"`: Splits by whitespace/punctuation. Simpler, but can result in `[UNK]` tokens for transformers.
+
