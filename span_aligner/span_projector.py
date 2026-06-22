@@ -984,8 +984,6 @@ class SpanProjector:
             except ValueError:
                 if self.verbose:
                     print(f"  └─ Skipped (no token coverage).")
-                projected.append(None)
-                renderings.append(None)
                 continue
 
             # 1. Filter: keep only exact-match candidates when available
@@ -1046,8 +1044,6 @@ class SpanProjector:
             if not mapped_tgt:
                 if self.verbose:
                     print(f"  └─ No target tokens mapped.")
-                projected.append(None)
-                renderings.append(None)
                 continue
 
             clusters = self._find_contiguous_clusters(mapped_tgt, max_gap)
@@ -1098,8 +1094,6 @@ class SpanProjector:
             if not largest:
                 if self.verbose:
                     print(f"  └─ No cluster selected.")
-                projected.append(None)
-                renderings.append(None)
                 continue
                 
             min_idx, max_idx = min(largest), max(largest)
@@ -1131,7 +1125,9 @@ class SpanProjector:
                         'in_cluster': best_tgt in largest if best_tgt is not None else False
                     })
                     
+                extra = {k: v for k, v in span.items() if k not in ("start", "end", "text", "labels")}
                 projected.append({
+                    **extra,
                     "start": tgt_start,
                     "end": tgt_end,
                     "text": tgt_text[tgt_start:tgt_end],
@@ -1143,7 +1139,9 @@ class SpanProjector:
                     "all_clusters": clusters
                 })
             else:
+                extra = {k: v for k, v in span.items() if k not in ("start", "end", "text", "labels")}
                 projected.append({
+                    **extra,
                     "start": tgt_start,
                     "end": tgt_end,
                     "text": tgt_text[tgt_start:tgt_end],
@@ -1183,8 +1181,7 @@ class SpanProjector:
         src_spans = parsed["spans"] + parsed["entities"]
 
         projected = self.project_spans(raw_src_text, tgt_text, src_spans, max_gap=max_gap, debugging=debugging)
-        projected_valid = [s for s in projected if s is not None]
-        tagged_tgt, _ = SpanAligner.rebuild_tagged_text(tgt_text, projected_valid, [])
+        tagged_tgt, _ = SpanAligner.rebuild_tagged_text(tgt_text, projected, [])
         
         return tagged_tgt, projected
 
@@ -1218,7 +1215,9 @@ class SpanProjector:
 
         projected = []
         for item in detailed:
+            extra = {k: v for k, v in item.items() if k not in ("start", "end", "text", "labels", "cluster_size", "total_aligned", "num_clusters", "token_alignments", "all_clusters")}
             projected.append({
+                **extra,
                 "start": item["start"],
                 "end": item["end"],
                 "text": item["text"],
@@ -1261,7 +1260,6 @@ class SpanProjector:
             except ValueError as e:
                 if self.verbose:
                     print(f"  └─ Skipped (no token coverage): {e}")
-                projected.append(None)
                 continue
 
             alignment = result.alignments.get(self.matching_method, [])
@@ -1282,7 +1280,6 @@ class SpanProjector:
             if not mapped_tgt:
                 if self.verbose:
                     print(f"  └─ No target tokens mapped.")
-                projected.append(None)
                 continue
 
             clusters = self._find_contiguous_clusters(mapped_tgt, max_gap)
@@ -1342,7 +1339,9 @@ class SpanProjector:
                     'in_cluster': best_tgt is not None
                 })
             
+            extra = {k: v for k, v in span.items() if k not in ("start", "end", "text", "labels")}
             projected.append({
+                **extra,
                 "start": tgt_start,
                 "end": tgt_end,
                 "text": tgt_text[tgt_start:tgt_end],
